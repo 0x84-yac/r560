@@ -33,7 +33,7 @@ make -C "$KSRC" -j"$JOBS" O="$KSRC" ARCH="$ARCH" CROSS_COMPILE="$([ "$ARCH" = aa
      "$DEFCONF"
 
 echo "[02] merging fragment (scripts/config CLI)"
-"$KSRC/scripts/config" "$KSRC/.config" \
+"$KSRC/scripts/config" --file "$KSRC/.config" \
     --enable KASAN --enable KASAN_GENERIC \
     --enable DEBUG_FS --set-val FRAME_POINTER y \
     --enable KALLSYMS --enable KALLSYMS_ALL \
@@ -56,8 +56,9 @@ echo "[02] verifying KASAN is on"
 grep -q '^CONFIG_KASAN=y' "$KSRC/.config" || { echo "[02] CONFIG_KASAN missing — refusing to build"; exit 1; }
 
 echo "[02] building $TARGET (this is the long step)..."
+BUILD_TARGET="$([ "$ARCH" = aarch64 ] && echo Image || echo bzImage)"
 JOBS=$((JOBS < 8 ? JOBS : 8)) make -C "$KSRC" -j"$JOBS" ARCH="$ARCH" \
-     CROSS_COMPILE="$([ "$ARCH" = aarch64 ] && echo aarch64-linux-gnu-)" O="$KSRC" "$TARGET"
+     CROSS_COMPILE="$([ "$ARCH" = aarch64 ] && echo aarch64-linux-gnu-)" O="$KSRC" "$BUILD_TARGET"
 
 echo "[02] building modules in-tree too (needed for the initramfs)"
 make -C "$KSRC" -j"$JOBS$JOBS" ARCH="$ARCH" \
