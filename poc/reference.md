@@ -1,0 +1,1 @@
+https://googleprojectzero.github.io/0days-in-the-wild/0day-RCAs/2023/CVE-2023-4211.html#:~:text=CVE%2D2023%2D4211%3A%20Use%2Dafter%2DFree%20in%20ARM%20Mali%20GPU%20Driver,Driver%3A%20All%20versions%20from%20r12p0%20%2D%20r32p0.

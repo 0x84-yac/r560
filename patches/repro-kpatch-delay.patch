@@ -1,0 +1,33 @@
+diff --git a/drivers/gpu/arm/midgard/mali_kbase_mem_linux.c b/drivers/gpu/arm/midgard/mali_kbase_mem_linux.c
+index xxxxxxx..xxxxxxx 100644
+--- a/drivers/gpu/arm/midgard/mali_kbase_mem_linux.c
++++ b/drivers/gpu/arm/midgard/mali_kbase_mem_linux.c
+@@ -35,10 +35,11 @@
+ #include <linux/shrinker.h>
+ #include <linux/cache.h>
+ #include <linux/memory_group_manager.h>
+ #include <linux/math64.h>
+ #include <linux/migrate.h>
++#include <linux/delay.h>
+ 
+ #include <mali_kbase.h>
+ #include <mali_kbase_mem_linux.h>
+ #include <tl/mali_kbase_tracepoints.h>
+ #include <uapi/gpu/arm/midgard/mali_kbase_ioctl.h>
+@@ -3409,10 +3410,16 @@ void kbasep_os_process_page_usage_drain(struct kbase_context *kctx)
+ 
+ 	rcu_assign_pointer(kctx->process_mm, NULL);
+ 	spin_unlock(&kctx->mm_update_lock);
+ 	synchronize_rcu();
+ 
++	if (strcmp(current->comm, "SLOWME") == 0) {
++		pr_warn("%s: begin delay injection\n", __func__);
++		mdelay(5000);
++		pr_warn("%s: end delay injection\n", __func__);
++	}
++
+ 	pages = atomic_xchg(&kctx->nonmapped_pages, 0);
+ #ifdef SPLIT_RSS_COUNTING
+ 	kbasep_add_mm_counter(mm, MM_FILEPAGES, -pages);
+ #else
+ 	spin_lock(&mm->page_table_lock);
