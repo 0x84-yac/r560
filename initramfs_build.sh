@@ -54,8 +54,12 @@ BUSYBOX_VERSION="${BUSYBOX_VERSION:-1.32.0}"
 BUSYBOX_BIN="${BUSYBOX_BIN:-}"
 BUSYBOX_REBUILD="${BUSYBOX_REBUILD:-0}"
 INITRAMFS_SHELL="${INITRAMFS_SHELL:-1}"
+UNPRIV_SHELL="${UNPRIV_SHELL:-1}"
 BAKE_MODULE="${BAKE_MODULE:-0}"
 SMOKE_BIN="${SMOKE_BIN:-}"
+POC_UID="${POC_UID:-1000}"
+POC_GID="${POC_GID:-1000}"
+POC_USER="${POC_USER:-poc}"
 # Local checkout that already ships the BusyBox source tarball (optional).
 BUSYBOX_SEED_DIR="${BUSYBOX_SEED_DIR:-/home/za0x/00-00/00-003/mali_models/initramfs}"
 
@@ -165,7 +169,7 @@ if [ "$BUSYBOX_BIN" = "$BSRC/busybox" ]; then
 else
   # Prebuilt BusyBox override: create a sensible applet symlink set ourselves.
   mkdir -p "$ROOTFS/bin" "$ROOTFS/sbin" "$ROOTFS/usr/bin" "$ROOTFS/usr/sbin"
-  for a in sh mount umount cat ls mkdir mknod chmod chown cp mv rm ln echo dmesg \
+  for a in sh su chown mount umount cat ls mkdir mknod chmod chown cp mv rm ln echo dmesg \
            grep sed awk tr cut head tail sort sleep sync wget kill ps free uname \
            date dd hexdump find xargs true false test pwd env printf vi more \
            insmod rmmod modprobe lsmod mdev poweroff halt reboot ifconfig route \
@@ -175,6 +179,28 @@ else
 fi
 [ -e "$ROOTFS/bin/busybox" ] || cp -f "$BUSYBOX_BIN" "$ROOTFS/bin/busybox"
 chmod 0755 "$ROOTFS/bin/busybox"
+
+# Unprivileged user + helpers for PoC work (guest runs as root by default)
+mkdir -p "$ROOTFS/etc" "$ROOTFS/home/${POC_USER}" "$ROOTFS/tmp/poc"
+cat >> "$ROOTFS/etc/passwd" <<EOF
+${POC_USER}:x:${POC_UID}:${POC_GID}:${POC_USER}:/home/${POC_USER}:/bin/sh
+EOF
+cat >> "$ROOTFS/etc/group" <<EOF
+${POC_USER}:x:${POC_GID}:
+EOF
+chown "${POC_UID}:${POC_GID}" "$ROOTFS/home/${POC_USER}" "$ROOTFS/tmp/poc" 2>/dev/null || true
+chmod 1777 "$ROOTFS/tmp/poc"
+
+# Bake drop_priv into the initramfs if the tool source exists
+if [ -f "$ROOT/tools/drop_priv.c" ] && [ -n "${CROSS_COMPILE:-}" ]; then
+  log "  cross-compiling tools/drop_priv.c (static aarch64) -> /bin/drop_priv"
+  if "${CROSS_COMPILE}gcc" -static -O2 -Wall -DDEFAULT_UID=${POC_UID} -DDEFAULT_GID=${POC_GID} \
+       -o "$ROOTFS/bin/drop_priv" "$ROOT/tools/drop_priv.c" 2>&1; then
+    chmod 0755 "$ROOTFS/bin/drop_priv"
+  else
+    printf '\033[1;33mWARNING:\033[0m failed to cross-compile drop_priv (continuing)\n'
+  fi
+fi
 
 # optionally bake the module + smoke test in (fallback when no share is attached)
 if [ "$BAKE_MODULE" = 1 ]; then
@@ -238,7 +264,7 @@ dev="$(cat /sys/class/misc/mali0/dev 2>/dev/null)"
 if [ -n "$dev" ]; then
   rm -f /dev/mali0
   mknod /dev/mali0 c "${dev%:*}" "${dev#*:}" 2>/dev/null || true
-  chmod 0664 /dev/mali0 2>/dev/null || true
+  chmod 0666 /dev/mali0 2>/dev/null || true
 fi
 
 echo "=== /dev/mali* ==="
@@ -263,12 +289,25 @@ if [ -n "$MALI_BASE" ] && [ -x "$MALI_BASE/run.sh" ]; then
 fi
 
 echo "=== RESULT: probe=$(dmesg | grep -c 'Probed as mali0') smoke=$([ "$SMOKE" = 0 ] && echo PASS || echo "$SMOKE") ==="
+echo "=== PoC user: poc (uid=${POC_UID} gid=${POC_GID}) | /dev/mali0 $(ls -l /dev/mali0 2>&1 | awk '{print $1,$3,$4}') ==="
+[ -x /bin/drop_priv ] && echo "=== drop_priv available: drop_priv <poc_binary>  (drops to poc, then execs) ==="
+[ -x /bin/su ] && echo "=== su available: su - poc  (or su poc) ==="
+echo "=== drop PoCs in /host/mali/ or /mnt/mali/ or /tmp/poc (sticky) ==="
 INIT
 if [ "$INITRAMFS_SHELL" = 1 ]; then
-  cat >> "$ROOTFS/init" <<'INIT'
+  if [ "$UNPRIV_SHELL" = 1 ] && [ -x /bin/su ]; then
+    cat >> "$ROOTFS/init" <<'INIT'
+echo "=== starting unprivileged poc shell (exit to return to root triage shell) ==="
+su poc 2>/dev/null || su -s /bin/sh poc 2>/dev/null || { echo "su poc failed; falling back to root shell"; exec /bin/sh; }
+echo "=== returned from poc shell -> interactive root shell ==="
+exec /bin/sh
+INIT
+  else
+    cat >> "$ROOTFS/init" <<'INIT'
 echo "=== dropping to interactive shell (run /load_mod.sh to (re)load the module) ==="
 exec /bin/sh
 INIT
+  fi
 else
   cat >> "$ROOTFS/init" <<'INIT'
 echo "=== smoke test complete, powering off ==="
@@ -289,7 +328,7 @@ insmod "$KO" || exit 1
 dev="$(cat /sys/class/misc/mali0/dev 2>/dev/null)"
 if [ -n "$dev" ]; then
   rm -f /dev/mali0
-  mknod /dev/mali0 c "${dev%:*}" "${dev#*:}" && chmod 0664 /dev/mali0
+  mknod /dev/mali0 c "${dev%:*}" "${dev#*:}" && chmod 0666 /dev/mali0
 fi
 ls -l /dev/mali0 2>&1
 SCRIPT
@@ -322,5 +361,6 @@ log "[4/5] packaging $OUT"
   echo "busybox   : $BUSYBOX_BIN"
   echo "module    : $([ "$BAKE_MODULE" = 1 ] && echo "$KO (baked fallback)" || echo 'loaded from shared storage')"
   echo "init      : $([ "$INITRAMFS_SHELL" = 1 ] && echo 'interactive shell' || echo 'smoke-test + poweroff')"
+  echo "unpriv   : poc uid=${POC_UID} gid=${POC_GID} UNPRIV_SHELL=${UNPRIV_SHELL}"
 } | tee "$BUILD/logs/initramfs.txt"
 log "[5/5] done"

@@ -21,7 +21,7 @@ dev="$(cat /sys/class/misc/mali0/dev 2>/dev/null)"
 if [ -n "$dev" ]; then
   rm -f /dev/mali0
   mknod /dev/mali0 c "${dev%:*}" "${dev#*:}" 2>/dev/null || true
-  chmod 0664 /dev/mali0 2>/dev/null || true
+  chmod 0666 /dev/mali0 2>/dev/null || true
 fi
 
 ls -l /dev/mali0 2>&1
