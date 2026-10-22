@@ -31,13 +31,18 @@
 
 #define KBASE_IOCTL_TYPE 0x80
 
-/* _IOWR(0x80, 0, struct kbase_ioctl_version_check) */
+/* common layout */
 struct kbase_ioctl_version_check {
 	uint16_t major;
 	uint16_t minor;
 };
-#define KBASE_IOCTL_VERSION_CHECK \
+#define KBASE_IOCTL_VERSION_CHECK_LEGACY \
 	_IOWR(KBASE_IOCTL_TYPE, 0, struct kbase_ioctl_version_check)
+#define KBASE_IOCTL_VERSION_CHECK_CSF \
+	_IOWR(KBASE_IOCTL_TYPE, 52, struct kbase_ioctl_version_check)
+#ifndef KBASE_IOCTL_VERSION_CHECK
+#define KBASE_IOCTL_VERSION_CHECK KBASE_IOCTL_VERSION_CHECK_LEGACY
+#endif
 
 /* _IOW(0x80, 1, struct kbase_ioctl_set_flags) */
 struct kbase_ioctl_set_flags {
@@ -90,7 +95,13 @@ int main(int argc, char **argv)
 		KBASE_UK_VERSION_MAJOR, KBASE_UK_VERSION_MINOR
 	};
 	errno = 0;
-	rc = ioctl(fd, KBASE_IOCTL_VERSION_CHECK, &v);
+	rc = ioctl(fd, KBASE_IOCTL_VERSION_CHECK_LEGACY, &v);
+	if (rc < 0 && errno == ENOTTY) {
+		errno = 0;
+		v.major = KBASE_UK_VERSION_MAJOR;
+		v.minor = KBASE_UK_VERSION_MINOR;
+		rc = ioctl(fd, KBASE_IOCTL_VERSION_CHECK_CSF, &v);
+	}
 	err = errno;
 	report("KBASE_IOCTL_VERSION_CHECK", 1, rc == 0, rc, err);
 	printf("        kernel UK version = %u.%u (sent %u.%u)\n",

@@ -1,0 +1,53 @@
+# kernel-config.fragment — merged on top of defconfig by 02_build_kernel.sh.
+# Goal: fast KASAN kernel with everything the PoC needs, nothing it doesn't.
+
+# --- UAF-relevant instrumentation ------------------------------------------
+CONFIG_KASAN=y
+CONFIG_KASAN_GENERIC=y
+CONFIG_KASAN_OUTLINE=y
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_FS=y
+CONFIG_KALLSYMS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_STACKTRACE=y
+CONFIG_RWSEM_SPIN_ON_OWNER=y
+
+# --- QEMU/board plumbing ----------------------------------------------------
+CONFIG_VIRTUALIZATION=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_ARM_GIC=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+
+# --- The PoC chain needs ----------------------------------------------------
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODULE_FORCE_LOAD=y
+CONFIG_MODULE_FORCE_UNLOAD=y
+CONFIG_DEVMEM=y
+CONFIG_UNIX98_PTYS=y
+CONFIG_DEVPTS_FS=y
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_OVERLAY_FS=m
+CONFIG_EXT4_FS=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_XZ=y
+CONFIG_RD_ZSTD=y
+
+# --- Make the kctx-debugfs files reachable from a root (no auditd) shell ----
+CONFIG_PCI=y
+CONFIG_PCI_HOST_COMMON=y
+CONFIG_PCI_HOST_GENERIC=y
+
+# --- Mali-ish hooks (DDK loads as an out-of-tree module) --------------------
+# In-tree Mali is disabled; the out-of-tree r56p0 DDK module owns /dev/mali0.
+

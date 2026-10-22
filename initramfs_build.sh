@@ -289,7 +289,7 @@ if [ -n "$MALI_BASE" ] && [ -x "$MALI_BASE/run.sh" ]; then
 fi
 
 echo "=== RESULT: probe=$(dmesg | grep -c 'Probed as mali0') smoke=$([ "$SMOKE" = 0 ] && echo PASS || echo "$SMOKE") ==="
-echo "=== PoC user: poc (uid=${POC_UID} gid=${POC_GID}) | /dev/mali0 $(ls -l /dev/mali0 2>&1 | awk '{print $1,$3,$4}') ==="
+echo "=== PoC user: poc (uid=1000 gid=1000) /dev/mali0: $(ls -l /dev/mali0 2>&1) ==="
 [ -x /bin/drop_priv ] && echo "=== drop_priv available: drop_priv <poc_binary>  (drops to poc, then execs) ==="
 [ -x /bin/su ] && echo "=== su available: su - poc  (or su poc) ==="
 echo "=== drop PoCs in /host/mali/ or /mnt/mali/ or /tmp/poc (sticky) ==="
