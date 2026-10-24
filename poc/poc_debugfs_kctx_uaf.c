@@ -57,6 +57,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include "../tools/mali_handshake.h"
+
 #define UNUSED(x) (x) __attribute__((unused))
 
 /* ---- UAPI constants (mirrored from mali_kbase_ioctl.h) --------------------
@@ -170,6 +172,15 @@ static int do_mem_profile_flow(const char *dev_arg)
 		return 1;
 	}
 
+	/* VERSION_CHECK + SET_FLAGS: without a kcontext MEM_PROFILE_ADD (and
+	 * every other context ioctl) fails with EPERM and no per-kctx debugfs
+	 * directory is created.  See tools/mali_handshake.h. */
+	if (mali_kbase_setup(mali_fd) < 0) {
+		perror("Kbase VERSION_CHECK/SET_FLAGS");
+		close(mali_fd);
+		return 1;
+	}
+
 	/* Step 2 — create backing data + the debugfs file (i_private = kctx) */
 	memset(&add, 0, sizeof(add));
 	add.buffer = (unsigned long long)(uintptr_t)marker;
@@ -243,6 +254,15 @@ static int do_jit_file_flow(const char *fname)
 	mali_fd = open(dev, O_RDWR);
 	if (mali_fd < 0) {
 		perror("open /dev/maliN");
+		return 1;
+	}
+
+	/* VERSION_CHECK + SET_FLAGS: without a kcontext MEM_PROFILE_ADD (and
+	 * every other context ioctl) fails with EPERM and no per-kctx debugfs
+	 * directory is created.  See tools/mali_handshake.h. */
+	if (mali_kbase_setup(mali_fd) < 0) {
+		perror("Kbase VERSION_CHECK/SET_FLAGS");
+		close(mali_fd);
 		return 1;
 	}
 

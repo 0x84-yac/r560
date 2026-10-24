@@ -18,8 +18,12 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <signal.h>
+
+#include "../tools/mali_handshake.h"
 
 // Simple error checking function
 
@@ -41,16 +45,16 @@ struct kbase_ioctl_set_flags {
 #define BASE_MEM_MAP_TRACKING_HANDLE (3ul << LOCAL_PAGE_SHIFT)
 
 // Simple error checking macro
-#define SYSCHK(x) simple_syschk(x, #x, __FILE__, __LINE__)
+#define SYSCHK(x) ((__typeof__(x))simple_syschk((long)(x), #x, __FILE__, __LINE__))
 
-int simple_syschk(long result, const char* call, const char* file, int line) {
+long simple_syschk(long result, const char* call, const char* file, int line) {
     if (result == -1) {
         fprintf(stderr, "\n[FATAL] System call failed: %s\n", strerror(errno));
         fprintf(stderr, "       File: %s, Line: %d\n", file, line);
         fprintf(stderr, "       Call: %s\n", call);
         exit(1);
     }
-    return (int)result;
+    return result;
 }
 
 int main(void) {
@@ -78,7 +82,7 @@ int main(void) {
     struct kbase_ioctl_version_check vc = {.major = 11, .minor = 11};
     printf("  - Input: major=%d, minor=%d\n", vc.major, vc.minor);
     
-    int version_ret = ioctl(mali_fd, KBASE_IOCTL_VERSION_CHECK, &vc);
+    int version_ret = mali_kbase_version_check(mali_fd, &vc.major, &vc.minor);
     if (version_ret < 0) {
         printf("  -> FAILURE: %s\n", strerror(errno));
     } else {

@@ -21,11 +21,15 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <signal.h>
 
+#include "../tools/mali_handshake.h"
+
 // Simple error checking macro
-#define SYSCHK(x) { \
+#define SYSCHK(x) ({ \
   typeof(x) __res = (x); \
   if (__res == (typeof(x))-1) { \
     fprintf(stderr, "[FATAL] System call failed: %s\n", strerror(errno)); \
@@ -33,7 +37,7 @@
     exit(1); \
   } \
   __res; \
-}
+})
 
 #define DEBUG_LOG(msg, ...) \
   do { \
@@ -98,7 +102,7 @@ int main(void) {
     struct kbase_ioctl_version_check vc = {.major = 11, .minor = 11};
     printf("  - Input structure: major=%d, minor=%d\n", vc.major, vc.minor);
     
-    int version_ret = ioctl(mali_fd, KBASE_IOCTL_VERSION_CHECK, &vc);
+    int version_ret = mali_kbase_version_check(mali_fd, &vc.major, &vc.minor);
     if (version_ret < 0) {
         printf("  -> FAILURE: Version check failed: %s\n", strerror(errno));
     } else {

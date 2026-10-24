@@ -40,10 +40,18 @@
 #   BUSYBOX_BIN        use this prebuilt static busybox instead of compiling
 #   BUSYBOX_REBUILD    1 to force recompiling busybox even if cached
 #   BUSYBOX_SEED_DIR   dir searched for a local busybox source tarball
-#   INITRAMFS_SHELL    1 = drop to a shell on boot, 0 = smoke-test + poweroff
+#   INITRAMFS_SHELL    1 = interactive triage shell, 0 = smoke-test + poweroff
+#   UNPRIV_SHELL       1 = start with a PoC (uid 1000) shell, then root shell
+#                      0 = start directly in the root triage shell (default;
+#                          debugfs under /sys/kernel/debug is root-only)
 #   BAKE_MODULE        0 = module comes from the shared storage (default)
 #                      1 = also embed $KO as /mali_kbase.ko fallback
 #   SMOKE_BIN          optional static aarch64 binary embedded as /mali_smoke
+#
+# Interactive boots do NOT run share/mali/run.sh automatically by default:
+# an on-demand shell is more reliable (a crashing PoC cannot take the session
+# down before it starts). Pass AUTORUN=1 to run_arm64.sh, or append
+# mali.autorun=1 to the kernel cmdline, to run the tests before the shell.
 #
 set -euo pipefail
 
@@ -54,7 +62,7 @@ BUSYBOX_VERSION="${BUSYBOX_VERSION:-1.32.0}"
 BUSYBOX_BIN="${BUSYBOX_BIN:-}"
 BUSYBOX_REBUILD="${BUSYBOX_REBUILD:-0}"
 INITRAMFS_SHELL="${INITRAMFS_SHELL:-1}"
-UNPRIV_SHELL="${UNPRIV_SHELL:-1}"
+UNPRIV_SHELL="${UNPRIV_SHELL:-0}"
 BAKE_MODULE="${BAKE_MODULE:-0}"
 SMOKE_BIN="${SMOKE_BIN:-}"
 POC_UID="${POC_UID:-1000}"
@@ -66,14 +74,20 @@ BUSYBOX_SEED_DIR="${BUSYBOX_SEED_DIR:-/home/za0x/00-00/00-003/mali_models/initra
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Resolve the driver flavor when KO/OUT were not pinned (build.sh passes both
 # explicitly along with DRIVER_FLAVOR/DRIVER_VERSION).
-if [ -z "${KO:-}" ] && [ -n "${OUT:-}" ]; then
-  # OUT pinned without KO: take the module from the same out/ dir
+if [ -z "${KO:-}" ] && [ -n "${OUT:-}" ] && [ ! -d "${OUT}" ]; then
+  # OUT pinned to an image file without KO: take the module from that out/ dir
   KO="$(dirname "$OUT")/mali_kbase.ko"
 fi
-if [ -n "${DRIVER_FLAVOR:-}" ] || [ -z "${KO:-}" ] || [ -z "${OUT:-}" ]; then
+if [ -n "${DRIVER_FLAVOR:-}" ] || [ -z "${KO:-}" ] || [ -z "${OUT:-}" ] \
+   || [ -z "${FLAVOR_ID:-}" ]; then
   . "$ROOT/flavor.sh"
   flavor_detect   # no-op when DRIVER_FLAVOR is already set by the caller
   flavor_resolve  # fills DRIVER_* and FLAVOR_ID (never overwrites KO/OUT)
+fi
+# flavor_resolve uses OUT for the artifact *directory*; this script treats OUT
+# as the image filename. Reconcile when called standalone with a flavor only.
+if [ -d "${OUT:-}" ]; then
+  OUT="${OUT%/}/initramfs-arm64.cpio.gz"
 fi
 DL="$ROOT/downloads"
 BUILD="$ROOT/build"
@@ -159,7 +173,8 @@ is_static_arm64 "$BUSYBOX_BIN" \
 # ---------------------------------------------------------------------------
 log "[3/5] staging root filesystem in $ROOTFS"
 rm -rf "$ROOTFS"; mkdir -p "$ROOTFS"
-mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" "$ROOTFS/tmp" "$ROOTFS/mnt" "$ROOTFS/etc"
+mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" "$ROOTFS/tmp" "$ROOTFS/mnt" \
+         "$ROOTFS/etc" "$ROOTFS/root"
 
 if [ "$BUSYBOX_BIN" = "$BSRC/busybox" ]; then
   # Let BusyBox lay out its own applet symlinks. `make install` only reads the
@@ -173,7 +188,8 @@ else
            grep sed awk tr cut head tail sort sleep sync wget kill ps free uname \
            date dd hexdump find xargs true false test pwd env printf vi more \
            insmod rmmod modprobe lsmod mdev poweroff halt reboot ifconfig route \
-           ip setsid cttyhack; do
+           ip setsid cttyhack stat readlink realpath id whoami groups tty stty \
+           logname timeout clear less; do
     ln -sf busybox "$ROOTFS/bin/$a"
   done
 fi
@@ -183,11 +199,17 @@ chmod 0755 "$ROOTFS/bin/busybox"
 # Unprivileged user + helpers for PoC work (guest runs as root by default)
 mkdir -p "$ROOTFS/etc" "$ROOTFS/home/${POC_USER}" "$ROOTFS/tmp/poc"
 cat >> "$ROOTFS/etc/passwd" <<EOF
+root:x:0:0:root:/root:/bin/sh
 ${POC_USER}:x:${POC_UID}:${POC_GID}:${POC_USER}:/home/${POC_USER}:/bin/sh
 EOF
 cat >> "$ROOTFS/etc/group" <<EOF
+root:x:0:
 ${POC_USER}:x:${POC_GID}:
 EOF
+# Interactive boots default to an on-demand shell; batch boots still run the
+# test hook automatically. run_arm64.sh can override this via mali.autorun=...
+printf '%s\n' "$([ "$INITRAMFS_SHELL" = 1 ] && echo 0 || echo 1)" \
+  > "$ROOTFS/etc/mali-autorun"
 chown "${POC_UID}:${POC_GID}" "$ROOTFS/home/${POC_USER}" "$ROOTFS/tmp/poc" 2>/dev/null || true
 chmod 1777 "$ROOTFS/tmp/poc"
 
@@ -238,8 +260,16 @@ cat /proc/cmdline
 # --- shared storage -------------------------------------------------------
 mkdir -p /mnt /host
 mount -t ext4 /dev/vda /mnt 2>/dev/null && echo "shared disk   : /dev/vda -> /mnt"
-mount -t 9p -o trans=virtio,version=9p2000.L host0 /host 2>/dev/null \
-  && echo "shared folder : host0 -> /host"
+# Use a larger msize and loose caching: the 8 KiB 9p default makes bulk
+# reads from the share needlessly slow under QEMU.
+if mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,cache=loose \
+     host0 /host 2>/dev/null; then
+  echo "shared folder : host0 -> /host (9p msize=1MiB)"
+elif mount -t 9p -o trans=virtio,version=9p2000.L host0 /host 2>/dev/null; then
+  echo "shared folder : host0 -> /host (9p default msize)"
+else
+  echo "shared folder : host0 mount FAILED"
+fi
 
 # prefer the live 9p share, then the ext4 image, then a baked fallback
 MALI_BASE=""
@@ -247,7 +277,7 @@ for b in /host /mnt; do
   if [ -f "$b/mali/mali_kbase.ko" ]; then MALI_BASE="$b/mali"; break; fi
 done
 
-echo "=== loading mali_kbase.ko (NO_MALI dummy model) ==="
+echo "=== loading mali_kbase.ko (NO_MALI dummy model; may take ~1 min unstripped) ==="
 if [ -n "$MALI_BASE" ]; then
   echo "module source: $MALI_BASE/mali_kbase.ko"
   insmod "$MALI_BASE/mali_kbase.ko"
@@ -283,29 +313,41 @@ for cand in "$MALI_BASE/mali_smoke" /mnt/mali/mali_smoke /host/mali/mali_smoke /
 done
 
 # --- optional user hook (share/mali/run.sh) --------------------------------
-if [ -n "$MALI_BASE" ] && [ -x "$MALI_BASE/run.sh" ]; then
+# Interactive boots skip it unless AUTORUN=1 was requested; this keeps the
+# shell available even when a PoC wedges the driver.
+AUTORUN="$(cat /etc/mali-autorun 2>/dev/null || echo 1)"
+case " $(cat /proc/cmdline) " in
+  *" mali.autorun=0 "*) AUTORUN=0 ;;
+  *" mali.autorun=1 "*) AUTORUN=1 ;;
+esac
+if [ "$AUTORUN" = 1 ] && [ -n "$MALI_BASE" ] && [ -x "$MALI_BASE/run.sh" ]; then
   echo "=== extra: $MALI_BASE/run.sh ==="
   "$MALI_BASE/run.sh" || echo "run.sh rc=$?"
+elif [ -n "$MALI_BASE" ] && [ -x "$MALI_BASE/run.sh" ]; then
+  echo "=== tests not run automatically (run $MALI_BASE/run.sh when ready) ==="
 fi
 
 echo "=== RESULT: probe=$(dmesg | grep -c 'Probed as mali0') smoke=$([ "$SMOKE" = 0 ] && echo PASS || echo "$SMOKE") ==="
 echo "=== PoC user: poc (uid=1000 gid=1000) /dev/mali0: $(ls -l /dev/mali0 2>&1) ==="
-[ -x /bin/drop_priv ] && echo "=== drop_priv available: drop_priv <poc_binary>  (drops to poc, then execs) ==="
-[ -x /bin/su ] && echo "=== su available: su - poc  (or su poc) ==="
-echo "=== drop PoCs in /host/mali/ or /mnt/mali/ or /tmp/poc (sticky) ==="
+[ -x /bin/pocsh ] && echo "=== unprivileged shell: pocsh   one-off: drop_priv <cmd...> ==="
+echo "=== PoCs: /host/mali/ (9p), /mnt/mali/ (ext4), /tmp/poc (sticky) ==="
 INIT
 if [ "$INITRAMFS_SHELL" = 1 ]; then
-  if [ "$UNPRIV_SHELL" = 1 ] && [ -x /bin/su ]; then
+  if [ "$UNPRIV_SHELL" = 1 ]; then
     cat >> "$ROOTFS/init" <<'INIT'
-echo "=== starting unprivileged poc shell (exit to return to root triage shell) ==="
-su poc 2>/dev/null || su -s /bin/sh poc 2>/dev/null || { echo "su poc failed; falling back to root shell"; exec /bin/sh; }
-echo "=== returned from poc shell -> interactive root shell ==="
-exec /bin/sh
+echo "=== starting interactive session (PoC shell first, then root) ==="
+if [ -x /bin/cttyhack ]; then
+  exec /bin/cttyhack /bin/sh /bin/mali-session unpriv-first
+fi
+exec /bin/sh /bin/mali-session unpriv-first
 INIT
   else
     cat >> "$ROOTFS/init" <<'INIT'
-echo "=== dropping to interactive shell (run /load_mod.sh to (re)load the module) ==="
-exec /bin/sh
+echo "=== starting interactive root triage shell (debugfs requires root) ==="
+if [ -x /bin/cttyhack ]; then
+  exec /bin/cttyhack /bin/sh /bin/mali-session
+fi
+exec /bin/sh /bin/mali-session
 INIT
   fi
 else
@@ -343,6 +385,56 @@ wget -q -O "/$1" "http://10.0.2.2:8080/$1" && chmod 0755 "/$1" && echo "fetched 
 SCRIPT
 chmod 0755 "$ROOTFS/getfile.sh"
 
+cat > "$ROOTFS/bin/pocsh" <<'SCRIPT'
+#!/bin/sh
+# pocsh - run a shell (or a command) as the unprivileged PoC user.
+# Usage: pocsh [command [args...]]
+export HOME=/home/poc USER=poc LOGNAME=poc SHELL=/bin/sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+cd /home/poc 2>/dev/null || cd /
+if [ "$#" -eq 0 ]; then
+  set -- /bin/sh
+fi
+if [ -x /bin/drop_priv ]; then
+  exec /bin/drop_priv "$@"
+fi
+echo "pocsh: /bin/drop_priv is missing; cannot drop privileges" >&2
+exit 1
+SCRIPT
+chmod 0755 "$ROOTFS/bin/pocsh"
+
+cat > "$ROOTFS/bin/mali-session" <<'SCRIPT'
+#!/bin/sh
+# mali-session - interactive guest session for the Mali test VM.
+# init runs this through cttyhack, so job control works on the serial console.
+export HOME=/root USER=root LOGNAME=root SHELL=/bin/sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+cd /root 2>/dev/null || cd /
+
+if [ "${1:-}" = unpriv-first ]; then
+  echo "=== unprivileged PoC shell (uid ${POC_UID:-1000}); 'exit' returns to root ==="
+  /bin/pocsh || true
+  echo "=== returned from PoC shell ==="
+fi
+
+cat <<'BANNER'
+=== Mali guest triage shell (root) ===
+  /host/mali/run.sh        run the smoke test + all PoCs
+  pocsh                    unprivileged shell as the PoC user
+  drop_priv <cmd...>       run one command as the PoC user
+  /bin/load_mod.sh [ko]    (re)load mali_kbase
+  dmesg | tail -n 50       kernel log
+  /sys/kernel/debug/mali0  debugfs (root only)
+BANNER
+if [ "${1:-}" = unpriv-first ] && [ -x /bin/cttyhack ]; then
+  # The interactive PoC shell may leave the console's foreground process
+  # group pointing at its now-dead pgrp; steal the tty back for root.
+  exec /bin/cttyhack /bin/sh
+fi
+exec /bin/sh
+SCRIPT
+chmod 0755 "$ROOTFS/bin/mali-session"
+
 # ---------------------------------------------------------------------------
 # [4/5] package the initramfs
 # ---------------------------------------------------------------------------
@@ -360,7 +452,7 @@ log "[4/5] packaging $OUT"
   echo "initramfs : $OUT ($(stat -c%s "$OUT") bytes)"
   echo "busybox   : $BUSYBOX_BIN"
   echo "module    : $([ "$BAKE_MODULE" = 1 ] && echo "$KO (baked fallback)" || echo 'loaded from shared storage')"
-  echo "init      : $([ "$INITRAMFS_SHELL" = 1 ] && echo 'interactive shell' || echo 'smoke-test + poweroff')"
-  echo "unpriv   : poc uid=${POC_UID} gid=${POC_GID} UNPRIV_SHELL=${UNPRIV_SHELL}"
+  echo "init      : $([ "$INITRAMFS_SHELL" = 1 ] && echo 'interactive triage shell' || echo 'smoke-test + poweroff')"
+  echo "session   : $([ "$UNPRIV_SHELL" = 1 ] && echo 'PoC shell first, then root' || echo 'root triage shell') (poc uid=${POC_UID} gid=${POC_GID})"
 } | tee "$BUILD/logs/initramfs.txt"
 log "[5/5] done"

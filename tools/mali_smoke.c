@@ -9,17 +9,12 @@
  *   1. open("/dev/mali0", O_RDWR)                  [required]
  *   2. KBASE_IOCTL_VERSION_CHECK                    [required]
  *   3. KBASE_IOCTL_GET_GPUPROPS (size=0)            [informational]
- *   4. KBASE_IOCTL_SET_FLAGS                        [informational]
+ *   4. KBASE_IOCTL_SET_FLAGS                        [required]
  *
- * Exits 0 only when the required checks pass. The ioctl numbers/sizes are
- * taken verbatim from the Kbase UAPI headers
- *   include/uapi/gpu/arm/midgard/{,jm/}mali_kbase_ioctl.h
- * (stable across the Bifrost and Valhall driver releases we build, e.g.
- * r36p0 and r42p0) so no kernel headers are needed to build this.
- *
- * The VERSION_CHECK request carries the UK version of the driver the binary
- * was written against; the kernel replies with its own version and accepts
- * any request (verified on both flavors), so one binary serves all builds.
+ * VERSION_CHECK uses the legacy cmd 0 on valhall/bifrost and retries with
+ * the CSF cmd 52 when cmd 0 is the disabled reserved command (gen5 r56p0),
+ * see mali_handshake.h.  SET_FLAGS is what creates the kcontext on both
+ * driver families; without it every later ioctl returns EPERM.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +23,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+#include "mali_handshake.h"
 
 #define KBASE_IOCTL_TYPE 0x80
 
@@ -91,21 +88,15 @@ int main(int argc, char **argv)
 	if (fd < 0)
 		return 2;
 
-	struct kbase_ioctl_version_check v = {
-		KBASE_UK_VERSION_MAJOR, KBASE_UK_VERSION_MINOR
-	};
+	uint16_t major = KBASE_UK_VERSION_MAJOR;
+	uint16_t minor = KBASE_UK_VERSION_MINOR;
+
 	errno = 0;
-	rc = ioctl(fd, KBASE_IOCTL_VERSION_CHECK_LEGACY, &v);
-	if (rc < 0 && errno == ENOTTY) {
-		errno = 0;
-		v.major = KBASE_UK_VERSION_MAJOR;
-		v.minor = KBASE_UK_VERSION_MINOR;
-		rc = ioctl(fd, KBASE_IOCTL_VERSION_CHECK_CSF, &v);
-	}
-	err = errno;
+	rc = mali_kbase_version_check(fd, &major, &minor);
+	err = (rc < 0) ? errno : 0;
 	report("KBASE_IOCTL_VERSION_CHECK", 1, rc == 0, rc, err);
 	printf("        kernel UK version = %u.%u (sent %u.%u)\n",
-	       v.major, v.minor, KBASE_UK_VERSION_MAJOR, KBASE_UK_VERSION_MINOR);
+	       major, minor, KBASE_UK_VERSION_MAJOR, KBASE_UK_VERSION_MINOR);
 
 	struct kbase_ioctl_get_gpuprops gp = { 0, 0, 0 };
 	errno = 0;
@@ -115,11 +106,10 @@ int main(int argc, char **argv)
 	if (rc > 0)
 		printf("        GPU properties available: %d bytes\n", rc);
 
-	struct kbase_ioctl_set_flags f = { 0 };
 	errno = 0;
-	rc = ioctl(fd, KBASE_IOCTL_SET_FLAGS, &f);
+	rc = mali_kbase_set_flags(fd, 0);
 	err = errno;
-	report("KBASE_IOCTL_SET_FLAGS", 0, rc == 0, rc, err);
+	report("KBASE_IOCTL_SET_FLAGS", 1, rc == 0, rc, err);
 
 	close(fd);
 	printf("mali_smoke: %s\n", required_failures ? "FAIL" : "PASS");

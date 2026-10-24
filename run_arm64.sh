@@ -36,6 +36,12 @@
 #   DRIVER_FLAVOR   gen5 | valhall | bifrost (default: auto-detect, else gen5)
 #   DRIVER_VERSION  (default r42p0-01eac0)
 #   NO_STAGE        1 = do not refresh share/mali/ from the selected out/ dir
+#   NO_STRIP        1 = stage the full debug mali_kbase.ko instead of a
+#                        --strip-debug copy (correct but ~40 s slower insmod)
+#   AUTORUN         unset = use the initramfs default (interactive: off,
+#                            batch/smoke-test initramfs: on)
+#                   1     = run share/mali/run.sh before the interactive shell
+#                   0     = skip it even in a batch initramfs
 #   KASAN_EXTRA     extra kernel cmdline args (e.g. "kasan.report_always=1")
 #
 set -euo pipefail
@@ -54,7 +60,7 @@ while [ $# -gt 0 ]; do
                    DRIVER_FLAVOR="$2"; shift ;;
     --flavor=*)    DRIVER_FLAVOR="${1#--flavor=}" ;;
     --)            shift; EXTRA=("$@"); break ;;
-    -h|--help)     sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -73,14 +79,33 @@ IMG="$OUT/shared.img"
 # /host/mali/mali_kbase.ko can never be a different flavor's module.
 if [ "${NO_STAGE:-0}" != 1 ] && [ -s "$OUT/mali_kbase.ko" ]; then
   mkdir -p "$SHARE/mali"
-  cp -f "$OUT/mali_kbase.ko" "$SHARE/mali/mali_kbase.ko"
+  # The build keeps full DWARF in mali_kbase.ko (~47 MiB); the module loader
+  # does not need it, and parsing it under QEMU/KASAN delays boot by ~40 s.
+  # Stage a --strip-debug copy (symbols are preserved, so KASAN reports still
+  # resolve) unless NO_STRIP=1 was requested.
+  STRIP="${CROSS_COMPILE:-aarch64-linux-gnu-}strip"
+  staged=""
+  if [ "${NO_STRIP:-0}" != 1 ] && command -v "$STRIP" >/dev/null 2>&1; then
+    if "$STRIP" --strip-debug -o "$SHARE/mali/mali_kbase.ko.tmp" \
+         "$OUT/mali_kbase.ko" 2>/dev/null; then
+      mv -f "$SHARE/mali/mali_kbase.ko.tmp" "$SHARE/mali/mali_kbase.ko"
+      staged="stripped"
+    else
+      rm -f "$SHARE/mali/mali_kbase.ko.tmp"
+    fi
+  fi
+  if [ -z "$staged" ]; then
+    cp -f "$OUT/mali_kbase.ko" "$SHARE/mali/mali_kbase.ko"
+    staged="full debug"
+  fi
   for f in load_mod.sh run.sh; do
     if [ -f "$ROOT/tools/$f" ]; then
       cp -f "$ROOT/tools/$f" "$SHARE/mali/$f"
       chmod 0755 "$SHARE/mali/$f"
     fi
   done
-  printf '\033[1;34m==>\033[0m staged %s -> %s/mali/\n' "$OUT/mali_kbase.ko" "$SHARE"
+  printf '\033[1;34m==>\033[0m staged %s (%s) -> %s/mali/\n' \
+    "$OUT/mali_kbase.ko" "$staged" "$SHARE"
 fi
 
 for f in "$OUT/Image.gz" "$OUT/initramfs-arm64.cpio.gz" "$OUT/virt_mali.dtb"; do
@@ -104,6 +129,13 @@ if [ "$USE_9P" = 1 ]; then
 fi
 
 APPEND='console=ttyAMA0 rdinit=/init acpi=off nokaslr loglevel=7'
+# Only override the initramfs default when AUTORUN was explicitly requested.
+if [ -n "${AUTORUN+x}" ]; then
+  case "$AUTORUN" in
+    0|1) APPEND="$APPEND mali.autorun=$AUTORUN" ;;
+    *)   printf 'ERROR: AUTORUN must be 0 or 1 (got: %s)\n' "$AUTORUN" >&2; exit 2 ;;
+  esac
+fi
 # Extra kernel cmdline knobs (e.g. KASAN_EXTRA="kasan.report_always=1").
 [ -n "${KASAN_EXTRA:-}" ] && APPEND="$APPEND $KASAN_EXTRA"
 

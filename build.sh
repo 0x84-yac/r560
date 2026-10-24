@@ -48,6 +48,8 @@
 #   DISK_SIZE_MB       (default 64: size of the shared image)
 #   BAKE_MODULE        0 | 1             (default 0: module loaded from the share,
 #                                         1: also embed it in the initramfs)
+#   NO_STRIP           0 | 1             (default 0: stage a --strip-debug copy of
+#                                         mali_kbase.ko for fast guest insmod)
 #
 set -euo pipefail
 
@@ -451,7 +453,16 @@ fi
 if [ "${BUILD_DISK:-1}" = 1 ]; then
   log "[10/10] staging share/ and building the shared ext4 image"
   mkdir -p "$SHARE/mali" "$SHARE/out"
-  cp -f "$OUT/mali_kbase.ko"      "$SHARE/mali/mali_kbase.ko"
+  # Stage a --strip-debug copy: the loader does not need DWARF, and parsing
+  # the full ~47 MiB module under QEMU/KASAN delays boot by ~40 s.
+  if [ "${NO_STRIP:-0}" != 1 ] && command -v "${CROSS_COMPILE}strip" >/dev/null 2>&1 \
+     && "${CROSS_COMPILE}strip" --strip-debug -o "$SHARE/mali/mali_kbase.ko.tmp" \
+          "$OUT/mali_kbase.ko" 2>/dev/null; then
+    mv -f "$SHARE/mali/mali_kbase.ko.tmp" "$SHARE/mali/mali_kbase.ko"
+  else
+    rm -f "$SHARE/mali/mali_kbase.ko.tmp"
+    cp -f "$OUT/mali_kbase.ko" "$SHARE/mali/mali_kbase.ko"
+  fi
   cp -f "$ROOT/tools/load_mod.sh" "$SHARE/mali/load_mod.sh"
   cp -f "$ROOT/tools/run.sh"      "$SHARE/mali/run.sh"
   chmod 0755 "$SHARE/mali/load_mod.sh" "$SHARE/mali/run.sh"

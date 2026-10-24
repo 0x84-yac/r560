@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 
+#include "../tools/mali_handshake.h"
+
 #define SYSCHK(x) ({          \
   typeof(x) __res = (x);      \
   if (__res == (typeof(x))-1) \
@@ -46,7 +48,7 @@ int main(void) {
     .major = 11,
     .minor = 11
   };
-  SYSCHK(ioctl(mali_fd, KBASE_IOCTL_VERSION_CHECK, &vc));
+  SYSCHK(mali_kbase_version_check(mali_fd, &vc.major, &vc.minor));
   struct kbase_ioctl_set_flags set_flags = { .create_flags = 0 };
   SYSCHK(ioctl(mali_fd, KBASE_IOCTL_SET_FLAGS, &set_flags));
 
